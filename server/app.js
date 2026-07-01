@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generateMaze, validateMaze, compareGenerators } from './algorithms/mazeGenerator.js';
-import { solveResourcePath } from './algorithms/resourceDp.js';
+import { solveResourcePath, verifyResourceMaximization } from './algorithms/resourceDp.js';
 import { solveBossGroup, simulateBossBattle } from './algorithms/bossSolver.js';
 import { simulateAi, AI_STRATEGIES } from './algorithms/aiPlayer.js';
 import { greedyStep, evaluateGreedy } from './algorithms/greedyVision.js';
@@ -68,6 +68,15 @@ app.post('/api/resource/optimal-path', (req, res) => {
   try {
     const maze = normalizeMaze(req.body.maze ?? req.body);
     res.json(ok({ data: solveResourcePath(maze) }));
+  } catch (error) {
+    res.status(400).json(fail(error));
+  }
+});
+
+app.post('/api/resource/collect-test', (req, res) => {
+  try {
+    const maze = normalizeMaze(req.body.maze ?? req.body);
+    res.json(ok({ data: verifyResourceMaximization(maze, { limit: req.body.limit, bruteForceCap: req.body.bruteForceCap }) }));
   } catch (error) {
     res.status(400).json(fail(error));
   }

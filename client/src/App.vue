@@ -16,6 +16,7 @@ const state = reactive({
   output: '等待运行。',
   validation: null,
   resourceResult: null,
+  collectTestResult: null,
   bossResult: null,
   aiResult: null,
   metrics: null,
@@ -32,6 +33,7 @@ const highlighted = reactive({
 });
 
 let timer = null;
+const fileInputRef = ref(null);
 
 const maze = computed(() => state.mazeData?.maze ?? []);
 const rows = computed(() => maze.value.length);
@@ -132,6 +134,55 @@ async function solveResource() {
   } catch (error) {
     state.output = `DP 计算失败：${error.message}`;
   }
+}
+
+// 资源收集路径测试：检查资源收集是否已最大化、给出路径长度，收集完最优资源即可停止（不必走到终点）。
+async function runResourceCollectTest() {
+  clearAnimation();
+  try {
+    const payload = readPayload();
+    const result = await api.resourceCollectTest(payload);
+    state.collectTestResult = result.data;
+    setOutput('资源收集路径测试（无需走到终点，收集完最优资源即可停止）', result.data);
+    animateResourcePath(result.data.expandedPath ?? []);
+  } catch (error) {
+    state.output = `资源收集测试失败：${error.message}`;
+  }
+}
+
+function triggerFileImport() {
+  fileInputRef.value?.click();
+}
+
+// 从本地导入 JSON 文件：含 maze 字段则整体替换当前迷宫；
+// 只含 B / PlayerSkills 等字段（例如老师发的 boss_case_N.json）则合并进当前迷宫，不覆盖 maze。
+function handleFileImport(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(reader.result);
+      if (Array.isArray(parsed.maze)) {
+        setMazeData(parsed);
+        setOutput(`✓ 已从文件导入迷宫：${file.name}`, parsed);
+      } else if ('B' in parsed || 'PlayerSkills' in parsed || 'minRouds' in parsed || 'CoinConsumption' in parsed) {
+        const merged = { ...state.mazeData };
+        for (const field of ['B', 'PlayerSkills', 'minRouds', 'CoinConsumption']) {
+          if (field in parsed) merged[field] = parsed[field];
+        }
+        setMazeData(merged);
+        setOutput(`✓ 已从文件合并 BOSS/参数配置（文件不含 maze，保留当前迷宫矩阵）：${file.name}`, merged);
+      } else {
+        state.output = `导入失败：${file.name} 中既没有 maze 字段，也没有 B/PlayerSkills 等字段`;
+      }
+    } catch (error) {
+      state.output = `导入失败：${error.message}`;
+    } finally {
+      event.target.value = '';
+    }
+  };
+  reader.readAsText(file, 'utf-8');
 }
 
 async function solveBoss() {
@@ -433,6 +484,7 @@ onMounted(useSample);
         <button title="验证迷宫" @click="validateMaze">验证</button>
         <button title="提交前合法性自检：格式/起终点/连通性/资源与陷阱/BOSS参数" @click="checkLegality">合法性自检</button>
         <button title="动态规划资源路径并可视化" @click="solveResource">DP 路径</button>
+        <button title="资源收集路径测试：检查资源收集是否已最大化、显示路径长度，收集完最优资源即可停止，无需走到终点" @click="runResourceCollectTest">资源收集测试</button>
         <button title="求解 BOSS 最少回合与技能序列" @click="solveBoss">BOSS</button>
         <button title="BOSS 实战：复活与 GAME OVER 推演" @click="runBossBattle">BOSS 实战</button>
         <button title="贪心 3×3 实时拾取多用例评测" @click="runGreedyBenchmark">贪心评测</button>
@@ -484,6 +536,14 @@ onMounted(useSample);
           </span>
           <span v-else>移动到格子上查看坐标和类型（B 格子会显示其对应的连续 BOSS 战信息）</span>
           <span v-if="state.validation">连通：{{ state.validation.connected ? '是' : '否' }} · 唯一路径：{{ state.validation.uniquePath ? '是' : '否' }}</span>
+          <span v-if="state.collectTestResult">
+            资源收集测试 ·
+            <template v-if="state.collectTestResult.start">最优起点 ({{ state.collectTestResult.start.row }}, {{ state.collectTestResult.start.col }}) · </template>
+            路径长度 {{ state.collectTestResult.pathLength }} · 收集资源 {{ state.collectTestResult.maxResource }} ·
+            <template v-if="state.collectTestResult.isMaximal === true">已验证最大化 ✓</template>
+            <template v-else-if="state.collectTestResult.isMaximal === false">未达最大 ✗</template>
+            <template v-else>资源较多，未穷举验证（DP 仍为精确最优解）</template>
+          </span>
         </footer>
       </section>
 
@@ -493,6 +553,8 @@ onMounted(useSample);
             <h2>迷宫编辑区（输入）</h2>
             <div class="mini-actions">
               <button title="载入样例" @click="useSample">样例</button>
+              <button title="从本地导入 JSON 文件：含 maze 则整体替换，只含 B/PlayerSkills 等字段则合并进当前迷宫" @click="triggerFileImport">导入文件</button>
+              <input ref="fileInputRef" type="file" accept="application/json,.json" style="display:none" @change="handleFileImport" />
               <button title="下载当前迷宫 JSON（草稿，与右侧结果无关）" @click="downloadJson">下载迷宫</button>
               <button title="导出最终版：合法性自检通过后生成 best_maze_design_组长名.json" class="primary" @click="exportSubmission">导出最终版</button>
             </div>

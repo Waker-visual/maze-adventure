@@ -76,20 +76,109 @@ export function solveSingleBoss(hp, rawSkills, initialCooldowns) {
   };
 }
 
+// 全局链式最优求解：状态 = (第几个 BOSS, 当前 BOSS 剩余血量, 冷却向量)，
+// 每使用一个技能算作一回合，用按回合分层的 BFS 找到"打完全部 BOSS 的最少【总】回合数"。
+//
+// 为什么不能像以前那样逐个 BOSS 各自取最少回合再拼起来：技能冷却会在 BOSS 之间继承，
+// 而同一个 BOSS 达到相同最少回合往往有多条技能序列，它们留给下一个 BOSS 的冷却状态不同。
+// 只顾把当前 BOSS 打到最少回合，可能把大招留在很长的冷却里，反而拖累后续 BOSS，
+// 导致【总】回合数不是最优（boss_case_3/4 就是这样被以前的贪心做法坑了）。
+// 这里把整条链一起搜索，才是真正的全局最优。
+function solveBossChainOptimal(bossHps, skills, cap = 400) {
+  if (!bossHps.length) return { success: true, totalTurns: 0, path: [] };
+  const n = skills.length;
+
+  // 起点：跳过进入时血量已 <=0 的 BOSS（正常用例不会出现，稳妥起见处理一下）。
+  let startBoss = 0;
+  while (startBoss < bossHps.length && bossHps[startBoss] <= 0) startBoss += 1;
+  if (startBoss >= bossHps.length) return { success: true, totalTurns: 0, path: [] };
+
+  const startCd = Array(n).fill(0);
+  const keyOf = (bi, hp, cd) => `${bi}|${Math.max(0, hp)}|${cd.join(',')}`;
+  let frontier = [{ bi: startBoss, hp: bossHps[startBoss], cd: startCd, path: [] }];
+  const seen = new Set([keyOf(startBoss, bossHps[startBoss], startCd)]);
+
+  for (let turns = 1; turns <= cap && frontier.length; turns += 1) {
+    const next = [];
+    for (const state of frontier) {
+      for (let i = 0; i < n; i += 1) {
+        if (state.cd[i] !== 0) continue;
+        const cd = state.cd.map((value) => Math.max(0, value - 1));
+        cd[i] = skills[i].cooldown;
+        let hp = state.hp - skills[i].damage;
+        let bi = state.bi;
+        const path = [...state.path, { boss: bi, skillIndex: i }];
+        if (hp <= 0) {
+          bi += 1;
+          while (bi < bossHps.length && bossHps[bi] <= 0) bi += 1;
+          if (bi >= bossHps.length) return { success: true, totalTurns: turns, path };
+          hp = bossHps[bi];
+        }
+        const stateKey = keyOf(bi, hp, cd);
+        if (seen.has(stateKey)) continue;
+        seen.add(stateKey);
+        next.push({ bi, hp, cd, path });
+      }
+    }
+    frontier = next;
+  }
+  return { success: false };
+}
+
+// 把全局最优路径按 BOSS 拆分，并回放冷却，得到每个 BOSS 的技能序列、回合数与结束冷却。
+function decomposeChain(path, bossHps, skills) {
+  const n = skills.length;
+  const perBoss = bossHps.map((hp) => ({ hp, bestSequence: [], minTurns: 0, finalCooldowns: Array(n).fill(0) }));
+  let cd = Array(n).fill(0);
+  for (const step of path) {
+    cd = cd.map((value) => Math.max(0, value - 1));
+    cd[step.skillIndex] = skills[step.skillIndex].cooldown;
+    const boss = perBoss[step.boss];
+    boss.bestSequence.push(skills[step.skillIndex].id);
+    boss.minTurns += 1;
+    boss.finalCooldowns = [...cd];
+  }
+  return perBoss;
+}
+
 export function solveBossGroup(input = {}) {
   const bosses = Array.isArray(input.B) ? input.B.map(Number) : [];
-  const skills = input.PlayerSkills ?? undefined;
-  const results = [];
-  let cooldowns;
-  for (let index = 0; index < bosses.length; index += 1) {
-    const solved = solveSingleBoss(bosses[index], skills, cooldowns);
-    results.push({ bossIndex: index, ...solved });
-    // 只有在此 BOSS 被击败（有解）时才推进冷却状态；若无解则保留上一状态，
-    // 避免污染后续 BOSS 的求解起点。
-    if (solved.minTurns != null) cooldowns = solved.finalCooldowns;
+  const rawSkills = input.PlayerSkills ?? undefined;
+  const skills = normalizeSkills(rawSkills);
+  const hasNoCooldownSkill = skills.some((skill) => skill.cooldown === 0);
+
+  const perBossWarning = hasNoCooldownSkill ? null : '未提供无冷却技能，技能进入冷却后可能无法持续输出';
+  const wrap = (perBoss) => perBoss.map((boss, index) => ({
+    bossIndex: index,
+    hp: boss.hp,
+    minTurns: boss.minTurns,
+    bestSequence: boss.bestSequence,
+    finalCooldowns: boss.finalCooldowns,
+    hasNoCooldownSkill,
+    warning: boss.minTurns == null ? perBossWarning : null,
+    skills
+  }));
+
+  let results;
+  // 只要存在无冷却技能，任何有限血量的 BOSS 都必然可解（大不了一直用该技能），
+  // 全局 BFS 一定能在上限内找到解，用它拿到全局最优总回合数。
+  const chain = skills.length && hasNoCooldownSkill ? solveBossChainOptimal(bosses, skills) : { success: false };
+  if (chain.success) {
+    results = wrap(decomposeChain(chain.path, bosses, skills));
+  } else {
+    // 兜底：无无冷却技能或全局搜索失败时，退回逐个 BOSS 贪心（可给出 null 表示无解），
+    // 保持对不可解用例的既有行为与告警。
+    const greedy = [];
+    let cooldowns;
+    for (let index = 0; index < bosses.length; index += 1) {
+      const solved = solveSingleBoss(bosses[index], rawSkills, cooldowns);
+      greedy.push({ bossIndex: index, ...solved });
+      if (solved.minTurns != null) cooldowns = solved.finalCooldowns;
+    }
+    results = greedy;
   }
+
   const minTurns = results.reduce((sum, boss) => sum + (boss.minTurns ?? 0), 0);
-  const hasNoCooldownSkill = normalizeSkills(skills).some((skill) => skill.cooldown === 0);
   return {
     bossCount: bosses.length,
     minTurns,

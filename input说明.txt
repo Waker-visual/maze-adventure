@@ -39,6 +39,12 @@ B         守卫终点的 BOSS
                                   时间、空间复杂度与挑战性对比
   GET  /api/algorithm/info       四种生成算法的复杂度与特性元数据
   POST /api/resource/optimal-path  动态规划：最多资源 + 不含起终点的最优资源收集路径
+  POST /api/resource/collect-test  资源收集路径测试（自由起点）：出发点可任选迷宫内任意可通行格，
+                                  不必从 S 出发；起点 S 不设奖励，且采集路径不经过起点 S（S 从采集图中排除）；
+                                  收集完最优资源即可停止（无需走到终点，也不绕价值为 0 的死胡同走廊）。
+                                  返回最优起点 start、路径长度 pathLength、最大资源 maxResource，
+                                  并交叉验证是否已达最大（金币数 ≤12 时用独立暴力穷举比对 isMaximal，
+                                  超过则 isMaximal 为 null，说明改用"最大权连通子树" DP 保证精确最优）
   POST /api/boss/solve           分支限界：最少回合数 + 最优技能序列（BOSS 间冷却继承）
   POST /api/boss/battle          BOSS 实战推演：失败→金币复活→金币耗尽 GAME OVER
   POST /api/maze/legality        提交前合法性自检：格式/起终点/连通性/唯一通路/

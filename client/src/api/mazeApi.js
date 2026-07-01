@@ -22,6 +22,7 @@ export const api = {
   validate: (payload) => request('/api/maze/validate', payload),
   compare: (payload) => request('/api/maze/compare', payload),
   resourcePath: (payload) => request('/api/resource/optimal-path', payload),
+  resourceCollectTest: (payload) => request('/api/resource/collect-test', payload),
   boss: (payload) => request('/api/boss/solve', payload),
   bossBattle: (payload) => request('/api/boss/battle', payload),
   ai: (payload) => request('/api/ai/simulate', payload),

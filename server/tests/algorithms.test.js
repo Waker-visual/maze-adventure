@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import sample from '../data/maze_15_15.json' with { type: 'json' };
 import { generateMaze, validateMaze, compareGenerators } from '../algorithms/mazeGenerator.js';
-import { solveResourcePath } from '../algorithms/resourceDp.js';
+import { solveResourcePath, solveResourceCollectOnly, verifyResourceMaximization } from '../algorithms/resourceDp.js';
 import { normalizeSkills, solveBossGroup, simulateBossBattle } from '../algorithms/bossSolver.js';
 import { simulateAi, AI_STRATEGIES } from '../algorithms/aiPlayer.js';
 import { evaluateGreedy, greedyStep, runGreedyCase, defaultGreedyCases } from '../algorithms/greedyVision.js';
@@ -60,9 +60,133 @@ for (const [index, maze] of dpCases.entries()) {
   });
 }
 
+// 回归用例：来自课程测试样例 maze_15_15_1.json，曾经暴露过一个真实 bug——
+// 分支点退回上一层时，代码把整段子路径（包含子路径内部自己的"进去再退回"）直接反转当作回程，
+// 导致子路径内部已经走过的岔路被当成回程重新整段走一遍，一枚金币因此被吃了两次。
+// 现改为沿树上父指针从子路径终点直接走回分支点，不再重放子路径内部的详细过程。
+test('resource dp never revisits the same coin twice (regression: naive path reversal bug)', () => {
+  const maze = [
+    ['#', '#', '#', '#', '#', '#', '#', '#', '#', '#', '#', '#', '#', '#', '#'],
+    ['#', ' ', ' ', ' ', '#', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', '#'],
+    ['#', ' ', '#', ' ', '#', ' ', '#', '#', '#', '#', '#', ' ', '#', ' ', '#'],
+    ['#', ' ', '#', ' ', ' ', 'T', ' ', 'G', '#', 'G', ' ', ' ', '#', ' ', '#'],
+    ['#', '#', '#', '#', '#', 'T', '#', '#', '#', '#', '#', '#', '#', '#', '#'],
+    ['#', ' ', ' ', ' ', ' ', ' ', ' ', ' ', '#', 'G', ' ', ' ', 'G', ' ', '#'],
+    ['#', ' ', '#', '#', '#', ' ', '#', '#', '#', ' ', '#', '#', '#', '#', '#'],
+    ['S', ' ', '#', ' ', ' ', 'B', '#', ' ', '#', ' ', ' ', ' ', '#', ' ', '#'],
+    ['#', ' ', '#', '#', '#', ' ', '#', ' ', '#', ' ', '#', ' ', '#', ' ', '#'],
+    ['#', ' ', '#', 'T', ' ', ' ', ' ', ' ', 'T', ' ', '#', ' ', ' ', ' ', '#'],
+    ['#', ' ', '#', '#', '#', ' ', '#', '#', '#', '#', '#', ' ', '#', '#', '#'],
+    ['#', ' ', '#', ' ', ' ', ' ', ' ', ' ', ' ', '#', ' ', ' ', ' ', ' ', '#'],
+    ['#', '#', '#', '#', '#', ' ', '#', '#', '#', ' ', '#', '#', '#', ' ', '#'],
+    ['#', ' ', ' ', ' ', ' ', ' ', ' ', ' ', '#', ' ', '#', ' ', ' ', ' ', '#'],
+    ['#', '#', '#', '#', 'E', '#', '#', '#', '#', '#', '#', '#', '#', '#', '#']
+  ];
+  const result = solveResourcePath(maze);
+  assert.equal(result.maxResource, 110);
+
+  const coinVisits = new Map();
+  for (const pos of result.expandedPath) {
+    if (maze[pos.row][pos.col] !== 'G') continue;
+    const k = `${pos.row},${pos.col}`;
+    coinVisits.set(k, (coinVisits.get(k) ?? 0) + 1);
+  }
+  for (const [cellKey, count] of coinVisits) {
+    assert.equal(count, 1, `coin at ${cellKey} should only be walked over once, got ${count}`);
+  }
+});
+
 test('resource dp prefers coins over traps (never negative optimum here)', () => {
   const result = solveResourcePath(sample.maze);
   assert.ok(result.maxResource >= 0, 'optimal resource should not be negative');
+});
+
+// 资源收集测试：不要求回到终点，收集完当前已知最优资源即可停止，并报告路径长度。
+test('resource collect-only DP stops after collecting resources instead of routing back to E', () => {
+  const maze = [
+    ['S', ' ', 'G', ' ', 'E'],
+    [' ', '#', ' ', '#', ' '],
+    ['G', ' ', ' ', ' ', 'G'],
+    [' ', '#', ' ', '#', ' '],
+    ['T', ' ', ' ', ' ', 'T']
+  ];
+  const result = solveResourceCollectOnly(maze);
+  assert.equal(result.maxResource, 150, 'should collect all 3 coins and skip both traps');
+  assert.equal(result.resourcePath.length, 3);
+  assert.equal(typeof result.pathLength, 'number');
+  assert.ok(result.pathLength > 0);
+  const last = result.expandedPath[result.expandedPath.length - 1];
+  const lastResource = result.resourcePath[result.resourcePath.length - 1];
+  assert.equal(last.row, lastResource.row, 'path should end at the last collected resource, not be forced onward to E');
+  assert.equal(last.col, lastResource.col);
+});
+
+// 自由起点：出发点可任选迷宫内任意可通行格，不必从 S 出发。当到金币必须穿过净收益为负的
+// 陷阱走廊时，固定从 S 出发只能放弃（=0），而自由起点可以直接从金币处开始采集。
+test('resource collect-only lets the start be freely chosen for a higher optimum', () => {
+  const maze = [
+    ['#', '#', '#', '#', '#', '#', '#', '#'],
+    ['#', 'S', ' ', 'T', 'T', 'T', 'G', '#'],
+    ['#', '#', '#', '#', '#', '#', '#', '#']
+  ];
+  const sRooted = solveResourcePath(maze);          // 固定从 S 出发（AI 玩家用，保持不变）
+  const free = solveResourceCollectOnly(maze);        // 自由起点（资源收集测试用）
+  assert.equal(sRooted.maxResource, 0, 'from S the trap corridor makes collecting the coin net-negative');
+  assert.equal(free.maxResource, 50, 'free start can begin at the coin and collect it directly');
+  assert.deepEqual(free.start, { row: 1, col: 6 }, 'chosen optimal start is the coin cell');
+
+  const verify = verifyResourceMaximization(maze);
+  assert.equal(verify.bruteForceValue, 50);
+  assert.equal(verify.isMaximal, true);
+});
+
+// 起点不设奖励且资源收集路径不经过起点 S；同时不应把通往终点/死胡同的价值为 0 的走廊算进采集路径。
+// 用例来自课程样例 maze_7_7：S 在底部、E 在顶部，两枚金币在右侧。曾出现路径从 E 出发绕一段空走廊
+// （价值 0）再采集，白白变长；也曾因并列 down 把 apex 定在 S 上导致路径经过起点。
+test('resource collect-only path never steps on the start S and skips value-0 dead-end corridors', () => {
+  const maze = [
+    ['#', '#', '#', '#', '#', 'E', '#'],
+    ['#', 'T', 'T', 'B', ' ', ' ', '#'],
+    ['#', ' ', '#', ' ', '#', '#', '#'],
+    ['#', ' ', '#', ' ', ' ', 'G', '#'],
+    ['#', 'G', '#', ' ', '#', '#', '#'],
+    ['#', 'T', '#', ' ', ' ', 'G', '#'],
+    ['#', '#', '#', '#', 'S', '#', '#']
+  ];
+  const result = solveResourceCollectOnly(maze);
+  assert.equal(result.maxResource, 100, 'best is the two right-side coins');
+
+  const onStart = result.expandedPath.some((p) => p.row === 6 && p.col === 4);
+  assert.equal(onStart, false, 'the resource-collection path must not pass through the start cell S');
+
+  // 首尾格都应是金币（起点不设奖励、也不绕价值为 0 的死胡同）。
+  const first = result.expandedPath[0];
+  const last = result.expandedPath[result.expandedPath.length - 1];
+  assert.equal(maze[first.row][first.col], 'G', 'path should start on a coin, not a value-0 corridor cell');
+  assert.equal(maze[last.row][last.col], 'G', 'path should end on a coin, not a value-0 corridor cell');
+  // 不应踏入终点 E 或其上方的死胡同走廊（(0,5)E / (1,4) / (1,5)）。
+  assert.equal(result.expandedPath.some((p) => p.row === 0 && p.col === 5), false, 'path should not detour to E');
+});
+
+// 独立暴力穷举与 DP 交叉验证：确认 DP 输出的资源值确实是可达范围内的最大值。
+test('verifyResourceMaximization confirms DP result matches brute force on a small maze', () => {
+  const maze = [
+    ['S', ' ', 'G', ' ', 'E'],
+    [' ', '#', ' ', '#', ' '],
+    ['G', ' ', ' ', ' ', 'G'],
+    [' ', '#', ' ', '#', ' '],
+    ['T', ' ', ' ', ' ', 'T']
+  ];
+  const result = verifyResourceMaximization(maze);
+  assert.equal(result.bruteForceValue, result.maxResource);
+  assert.equal(result.isMaximal, true);
+});
+
+test('verifyResourceMaximization skips brute force and explains why beyond the cap', () => {
+  const result = verifyResourceMaximization(sample.maze, { bruteForceCap: 1 });
+  assert.equal(result.isMaximal, null);
+  assert.equal(result.bruteForceValue, null);
+  assert.ok(result.verifyMethod.includes('超过穷举验证上限'));
 });
 
 // 多用例：BOSS 战在不同血量组上都能给出有限最少回合数与技能序列。
@@ -75,6 +199,30 @@ for (const [index, B] of bossCases.entries()) {
     assert.equal(result.hasNoCooldownSkill, true);
   });
 }
+
+// 回归用例：来自课程测试样例 boss_case_4，曾暴露真实 bug——以前逐个 BOSS 各自取最少回合、
+// 再把该序列产生的冷却状态硬塞给下一个 BOSS，忽略了"当前 BOSS 换一条同样最少回合的序列，
+// 能给后续 BOSS 留下更好的冷却"，导致【总】回合数不是全局最优。全局链式搜索后总回合应为 11。
+test('boss group finds globally optimal total turns across the cooldown chain (regression: boss_case_4)', () => {
+  const input = { B: [20, 10, 20], PlayerSkills: [[1, 0], [9, 4], [10, 5]] };
+  const result = solveBossGroup(input);
+  assert.equal(result.minTurns, 11, 'global optimum is 11 total turns, not the greedy-per-boss 13');
+
+  // 逐个技能回放，确认每次使用时技能确实不在冷却中，且每个 BOSS 都被打死（序列必须合法可执行）。
+  const skills = input.PlayerSkills.map((s) => ({ damage: s[0], cooldown: s[1] }));
+  let cd = skills.map(() => 0);
+  for (const boss of result.bosses) {
+    let hp = boss.hp;
+    for (const sid of boss.bestSequence) {
+      const idx = Number(sid.split('-')[1]) - 1;
+      assert.equal(cd[idx], 0, `skill ${sid} must be off cooldown when used`);
+      cd = cd.map((v) => Math.max(0, v - 1));
+      cd[idx] = skills[idx].cooldown;
+      hp -= skills[idx].damage;
+    }
+    assert.ok(hp <= 0, `BOSS ${boss.bossIndex + 1} must actually be defeated`);
+  }
+});
 
 test('boss battle clears with enough coins and reports rounds', () => {
   const result = simulateBossBattle({ ...sample, coins: 100 });
