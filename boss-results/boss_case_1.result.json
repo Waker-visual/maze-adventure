@@ -1,0 +1,89 @@
+{
+  "source": "boss_case_1.json",
+  "B": [
+    11,
+    13,
+    8,
+    17
+  ],
+  "PlayerSkills": [
+    [
+      6,
+      2
+    ],
+    [
+      2,
+      0
+    ],
+    [
+      4,
+      1
+    ]
+  ],
+  "minTurns": 13,
+  "hasNoCooldownSkill": true,
+  "bosses": [
+    {
+      "bossIndex": 0,
+      "hp": 11,
+      "minTurns": 3,
+      "sequenceSkillIndices": [
+        1,
+        3,
+        2
+      ],
+      "sequenceIds": [
+        "skill-1",
+        "skill-3",
+        "skill-2"
+      ]
+    },
+    {
+      "bossIndex": 1,
+      "hp": 13,
+      "minTurns": 3,
+      "sequenceSkillIndices": [
+        3,
+        1,
+        3
+      ],
+      "sequenceIds": [
+        "skill-3",
+        "skill-1",
+        "skill-3"
+      ]
+    },
+    {
+      "bossIndex": 2,
+      "hp": 8,
+      "minTurns": 2,
+      "sequenceSkillIndices": [
+        2,
+        1
+      ],
+      "sequenceIds": [
+        "skill-2",
+        "skill-1"
+      ]
+    },
+    {
+      "bossIndex": 3,
+      "hp": 17,
+      "minTurns": 5,
+      "sequenceSkillIndices": [
+        3,
+        2,
+        1,
+        3,
+        2
+      ],
+      "sequenceIds": [
+        "skill-3",
+        "skill-2",
+        "skill-1",
+        "skill-3",
+        "skill-2"
+      ]
+    }
+  ]
+}

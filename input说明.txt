@@ -1,0 +1,60 @@
+迷宫输入 / 输出标准说明
+========================
+
+一、迷宫字符约定
+------------------------
+字符      含义
+#         墙壁，不可通行
+（空格）  普通通路
+S         起点（迷宫中有且仅有一个）
+E         终点（迷宫中有且仅有一个）
+G         金币，价值 +50
+T         陷阱，价值 -30（设定每个陷阱仅触发一次）
+B         守卫终点的 BOSS
+
+说明：除 # 外，其余字符均视为可通行格子。
+
+二、标准 JSON 结构（与 maze_15_15.json 一致）
+------------------------
+{
+  "maze": [["#","S", ...], ...],   迷宫矩阵，二维字符数组（也兼容字符串数组的行）
+  "B": [11, 13, 9, 15],            一组 BOSS 的血量（依次挑战，技能冷却在 BOSS 之间继承，不重置）
+  "PlayerSkills": [[8,4],[2,0],[4,2],[6,3]],
+                                    玩家技能，每项为 [伤害, 冷却回合]，无普通/大招之分；
+                                    至少包含一个无冷却技能（冷却为 0）
+  "minRouds": 20,                  限定回合数（每条命可用的回合上限）
+  "CoinConsumption": 5             BOSS 战失败复活所需金币数
+}
+
+说明：B 数组代表在同一个 B 格子上连续挑战的多场 BOSS。进入每场 BOSS 使用的技能集合相同，
+但技能冷却状态会从上一场结束时的状态继承到下一场，而不是每场重置为 0。
+
+三、API 端点一览（POST，body 为上述 JSON）
+------------------------
+迷宫设计任务：
+  POST /api/maze/generate        生成迷宫（入参可含 size / algorithm / coinCount /
+                                  trapCount / seed），返回迷宫、校验、指标与生成过程快照
+  POST /api/maze/validate        校验：矩形、唯一 S/E、连通性、唯一通路（完美迷宫）
+  POST /api/maze/compare         四算法（分治/贪心-MST/回溯-DFS/分支限界-BFS）
+                                  时间、空间复杂度与挑战性对比
+  GET  /api/algorithm/info       四种生成算法的复杂度与特性元数据
+  POST /api/resource/optimal-path  动态规划：最多资源 + 不含起终点的最优资源收集路径
+  POST /api/boss/solve           分支限界：最少回合数 + 最优技能序列（BOSS 间冷却继承）
+  POST /api/boss/battle          BOSS 实战推演：失败→金币复活→金币耗尽 GAME OVER
+  POST /api/maze/legality        提交前合法性自检：格式/起终点/连通性/唯一通路/
+                                  15x15 尺寸/资源与陷阱/BOSS 参数（含无冷却技能校验）
+
+AI 玩家设计任务：
+  POST /api/ai/greedy-step       贪心：给定位置与局部迷宫，输出 3×3 视野内的单步决策
+  POST /api/ai/greedy-benchmark  贪心：多个 3×3 局部用例的拾取价值、每步均值与多用例均值
+  POST /api/ai/simulate          完整探险（strategy=greedy/optimal/speedrun），
+                                  输出过程、剩余资源价值、步数及二者比值
+  POST /api/cross-test           交叉测试矩阵：多迷宫 × 多 AI 的评分矩阵
+
+四、生成入参（/api/maze/generate、/api/maze/compare）
+------------------------
+  size        迷宫边长 n（自动取 ≥9 的奇数），生成 n×n 迷宫
+  algorithm   dfs | prim | divide | branch
+  coinCount   金币数量（默认 8）
+  trapCount   陷阱数量（默认 5）
+  seed        随机种子（字符串或数字）；相同 seed 生成完全相同的迷宫，便于复现与对照
