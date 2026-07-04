@@ -1,5 +1,5 @@
 ﻿<script setup>
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { api, loadSample } from './api/mazeApi.js';
 import localSample from './maze_15_15.json';
 
@@ -18,6 +18,7 @@ const state = reactive({
   resourceResult: null,
   collectTestResult: null,
   bossResult: null,
+  battleResult: null,
   aiResult: null,
   metrics: null,
   snapshots: [],
@@ -34,6 +35,25 @@ const highlighted = reactive({
 
 let timer = null;
 const fileInputRef = ref(null);
+
+// 人工玩家：用键盘（方向键 / WASD）在迷宫里移动，若恰好沿"最佳路径"（起点到终点的最短通路）
+// 抵达终点 E，则弹出金色 "Congratulations" 庆祝弹窗并撒彩带。
+const human = reactive({
+  active: false,
+  pos: null,
+  trail: [],
+  trailSet: new Set(),
+  optimalPath: [],
+  optimalSet: new Set(),
+  showHint: true,
+  ended: false,
+  win: false,
+  message: ''
+});
+const confetti = ref([]);
+
+// BOSS 结果可视化弹窗：kind='solve' 展示分支限界攻略，kind='battle' 展示实战推演时间线。
+const bossModal = reactive({ open: false, kind: null });
 
 const maze = computed(() => state.mazeData?.maze ?? []);
 const rows = computed(() => maze.value.length);
@@ -191,6 +211,7 @@ async function solveBoss() {
     const result = await api.boss(payload);
     state.bossResult = result.data;
     setOutput('BOSS 分支限界策略', result.data);
+    openBossModal('solve');
   } catch (error) {
     state.output = `BOSS 求解失败：${error.message}`;
   }
@@ -200,10 +221,63 @@ async function runBossBattle() {
   try {
     const payload = readPayload();
     const result = await api.bossBattle({ ...payload, coins: 50 });
+    state.battleResult = result.data;
     setOutput('BOSS 实战推演（复活 / GAME OVER）', result.data);
+    openBossModal('battle');
   } catch (error) {
     state.output = `BOSS 实战失败：${error.message}`;
   }
+}
+
+function openBossModal(kind) {
+  bossModal.kind = kind;
+  bossModal.open = true;
+}
+
+function closeBossModal() {
+  bossModal.open = false;
+}
+
+// 把技能 id 映射回本场 BOSS 的技能对象，用于在序列里显示伤害等信息。
+function skillOf(boss, skillId) {
+  return boss.skills?.find((s) => s.id === skillId) ?? null;
+}
+
+function skillLabel(boss, skillId) {
+  const s = skillOf(boss, skillId);
+  return s ? `${s.name}(-${s.damage})` : skillId;
+}
+
+// 每个技能在血条上占据的一段，宽度按该技能伤害占 BOSS 总血量的比例。
+function hpSegStyle(boss, skillId, index) {
+  const s = skillOf(boss, skillId);
+  const dmg = s ? s.damage : 0;
+  const pct = boss.hp > 0 ? Math.min(100, (dmg / boss.hp) * 100) : 0;
+  return { width: `${pct}%`, '--seg-index': index };
+}
+
+function battleEventIcon(ev) {
+  return { defeated: '✅', revive: '💰', 'game-over': '☠️', unbeatable: '🚫' }[ev.event] ?? '•';
+}
+
+function battleEventText(ev) {
+  switch (ev.event) {
+    case 'defeated':
+      return `BOSS ${ev.bossIndex + 1}（HP ${ev.hp}）被击败，本条命用 ${ev.roundsThisLife} 回合`;
+    case 'revive':
+      return `BOSS ${ev.bossIndex + 1}（HP ${ev.hp}）未在回合内击败，消耗 ${ev.cost} 金币复活`;
+    case 'game-over':
+      return `BOSS ${ev.bossIndex + 1}（HP ${ev.hp}）处金币耗尽 —— ${ev.reason}`;
+    case 'unbeatable':
+      return `BOSS ${ev.bossIndex + 1}（HP ${ev.hp}）无法击败：${ev.reason}`;
+    default:
+      return ev.event;
+  }
+}
+
+function coinPercent(result) {
+  if (!result || !result.startCoins) return 0;
+  return Math.max(0, Math.min(100, (result.remainingCoins / result.startCoins) * 100));
 }
 
 async function compareAlgorithms() {
@@ -408,6 +482,195 @@ async function exportSubmission() {
   setOutput(`✓ 已导出 best_maze_design_${leader}.json（合法性自检通过）`, payload);
 }
 
+// ===== 人工玩家 =====
+function findCellChar(ch) {
+  const grid = maze.value;
+  for (let r = 0; r < grid.length; r += 1) {
+    for (let c = 0; c < (grid[r]?.length ?? 0); c += 1) {
+      if (grid[r][c] === ch) return { row: r, col: c };
+    }
+  }
+  return null;
+}
+
+// 起点 S 到终点 E 的最短通路（完美迷宫里唯一），即"最佳路径"。
+function computeOptimalPath() {
+  const grid = maze.value;
+  const start = findCellChar('S');
+  const end = findCellChar('E');
+  if (!start || !end) return [];
+  const rowsN = grid.length;
+  const colsN = grid[0]?.length ?? 0;
+  const visited = Array.from({ length: rowsN }, () => Array(colsN).fill(false));
+  const prev = new Map();
+  const queue = [start];
+  visited[start.row][start.col] = true;
+  const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+  let found = false;
+  while (queue.length) {
+    const cur = queue.shift();
+    if (cur.row === end.row && cur.col === end.col) { found = true; break; }
+    for (const [dr, dc] of dirs) {
+      const nr = cur.row + dr;
+      const nc = cur.col + dc;
+      if (nr < 0 || nc < 0 || nr >= rowsN || nc >= colsN) continue;
+      if (visited[nr][nc] || grid[nr][nc] === '#') continue;
+      visited[nr][nc] = true;
+      prev.set(`${nr},${nc}`, cur);
+      queue.push({ row: nr, col: nc });
+    }
+  }
+  if (!found) return [];
+  const path = [];
+  let cur = end;
+  while (cur) {
+    path.push(cur);
+    if (cur.row === start.row && cur.col === start.col) break;
+    cur = prev.get(`${cur.row},${cur.col}`);
+  }
+  return path.reverse();
+}
+
+function startHumanPlayer() {
+  clearAnimation();
+  const start = findCellChar('S');
+  const end = findCellChar('E');
+  if (!start || !end) {
+    state.output = '人工玩家启动失败：迷宫缺少起点 S 或终点 E。';
+    return;
+  }
+  const optimal = computeOptimalPath();
+  human.active = true;
+  human.pos = { row: start.row, col: start.col };
+  human.trail = [{ row: start.row, col: start.col }];
+  human.trailSet = new Set([pointKey(start)]);
+  human.optimalPath = optimal;
+  human.optimalSet = new Set(optimal.map((p) => pointKey(p)));
+  human.showHint = true;
+  human.ended = false;
+  human.win = false;
+  human.message = '';
+  confetti.value = [];
+  setOutput('人工玩家已启动', {
+    操作: '方向键 ↑↓←→ 或 W/A/S/D 移动',
+    目标: '沿最佳路径走到终点 E',
+    最佳路径步数: Math.max(0, optimal.length - 1)
+  });
+}
+
+function resetHumanPlayer() {
+  const start = findCellChar('S');
+  if (!start) return;
+  human.pos = { row: start.row, col: start.col };
+  human.trail = [{ row: start.row, col: start.col }];
+  human.trailSet = new Set([pointKey(start)]);
+  human.ended = false;
+  human.win = false;
+  human.message = '';
+  confetti.value = [];
+}
+
+function exitHumanPlayer() {
+  human.active = false;
+  human.pos = null;
+  human.trail = [];
+  human.trailSet = new Set();
+  human.optimalPath = [];
+  human.optimalSet = new Set();
+  human.ended = false;
+  human.win = false;
+  human.message = '';
+  confetti.value = [];
+}
+
+function trailMatchesOptimal() {
+  const t = human.trail;
+  const o = human.optimalPath;
+  if (!o.length || t.length !== o.length) return false;
+  return t.every((p, i) => p.row === o[i].row && p.col === o[i].col);
+}
+
+function moveHuman(dr, dc) {
+  if (!human.active || human.win) return;
+  const grid = maze.value;
+  const nr = human.pos.row + dr;
+  const nc = human.pos.col + dc;
+  if (nr < 0 || nc < 0 || nr >= grid.length || nc >= (grid[nr]?.length ?? 0)) return;
+  if (grid[nr][nc] === '#') return;
+  human.pos = { row: nr, col: nc };
+  human.trail.push({ row: nr, col: nc });
+  human.trailSet.add(`${nr},${nc}`);
+  human.ended = false;
+  human.message = '';
+  if (grid[nr][nc] === 'E') finishHuman();
+}
+
+function finishHuman() {
+  human.ended = true;
+  if (trailMatchesOptimal()) {
+    human.win = true;
+    launchConfetti();
+  } else {
+    human.win = false;
+    const steps = human.trail.length - 1;
+    const best = Math.max(0, human.optimalPath.length - 1);
+    human.message = `到达终点，但不是最佳路径（你走了 ${steps} 步，最佳为 ${best} 步）。点击"重来"再挑战一次。`;
+  }
+}
+
+function launchConfetti() {
+  const colors = ['#f7d84a', '#ffd166', '#ffb703', '#ff5c73', '#65d6ff', '#48df7b', '#b37cff', '#fff3a3'];
+  const pieces = [];
+  for (let i = 0; i < 96; i += 1) {
+    pieces.push({
+      id: i,
+      left: Math.round(Math.random() * 100),
+      delay: (Math.random() * 0.9).toFixed(2),
+      duration: (2.4 + Math.random() * 2.2).toFixed(2),
+      color: colors[i % colors.length],
+      size: 6 + Math.round(Math.random() * 8),
+      drift: (Math.random() * 2 - 1).toFixed(2)
+    });
+  }
+  confetti.value = pieces;
+}
+
+function confettiStyle(piece) {
+  return {
+    left: `${piece.left}%`,
+    width: `${piece.size}px`,
+    height: `${Math.round(piece.size * 1.8)}px`,
+    background: piece.color,
+    animationDelay: `${piece.delay}s`,
+    animationDuration: `${piece.duration}s`,
+    '--drift': piece.drift
+  };
+}
+
+function closeCongrats() {
+  human.win = false;
+  confetti.value = [];
+}
+
+function handleKeydown(event) {
+  if (event.key === 'Escape') {
+    if (human.win) { closeCongrats(); return; }
+    if (bossModal.open) { closeBossModal(); return; }
+  }
+  if (!human.active) return;
+  const tag = event.target?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  let handled = true;
+  switch (event.key) {
+    case 'ArrowUp': case 'w': case 'W': moveHuman(-1, 0); break;
+    case 'ArrowDown': case 's': case 'S': moveHuman(1, 0); break;
+    case 'ArrowLeft': case 'a': case 'A': moveHuman(0, -1); break;
+    case 'ArrowRight': case 'd': case 'D': moveHuman(0, 1); break;
+    default: handled = false;
+  }
+  if (handled) event.preventDefault();
+}
+
 function cellClass(cell, row, col) {
   const id = `${row},${col}`;
   const resourceVisits = highlighted.resourcePath.get(id) ?? 0;
@@ -426,7 +689,10 @@ function cellClass(cell, row, col) {
     aiPath: aiVisits > 0,
     aiRepeat: aiVisits > 1,
     aiHeavyRepeat: aiVisits > 2,
-    currentAi: highlighted.currentAi === id
+    currentAi: highlighted.currentAi === id,
+    optimalHint: human.active && human.showHint && human.optimalSet.has(id),
+    humanTrail: human.active && human.trailSet.has(id),
+    humanPlayer: human.active && human.pos?.row === row && human.pos?.col === col
   };
 }
 
@@ -465,6 +731,8 @@ function bossHoverHint() {
 }
 
 onMounted(useSample);
+onMounted(() => window.addEventListener('keydown', handleKeydown));
+onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown));
 </script>
 
 <template>
@@ -490,6 +758,7 @@ onMounted(useSample);
         <button title="贪心 3×3 实时拾取多用例评测" @click="runGreedyBenchmark">贪心评测</button>
         <button title="迷宫 × AI 交叉测试矩阵" @click="runCrossTest" :disabled="state.running">交叉测试</button>
         <button title="运行 AI 玩家" class="primary" @click="runAi">AI 调试</button>
+        <button title="人工玩家：用方向键 / WASD 沿最佳路径走到终点" @click="startHumanPlayer">人工玩家</button>
       </div>
     </header>
 
@@ -507,6 +776,16 @@ onMounted(useSample);
             <span title="矩阵中只显示一个 B 字符，但 JSON 里的 B 数组可包含多场连续 BOSS 战"><i class="l boss"></i>B（可含多场）</span>
             <span><i class="l end"></i>E</span>
           </div>
+        </div>
+
+        <div v-if="human.active" class="human-hud">
+          <span class="hud-title">🎮 人工玩家</span>
+          <span class="hud-hint">方向键 / WASD 移动</span>
+          <span class="hud-steps">步数 {{ human.trail.length - 1 }} · 最佳 {{ Math.max(0, human.optimalPath.length - 1) }}</span>
+          <label class="hud-toggle"><input type="checkbox" v-model="human.showHint" /> 显示最佳路径</label>
+          <button @click="resetHumanPlayer">重来</button>
+          <button @click="exitHumanPlayer">退出</button>
+          <span v-if="human.ended && !human.win" class="hud-msg">{{ human.message }}</span>
         </div>
 
         <div class="maze-wrap">
@@ -598,5 +877,97 @@ onMounted(useSample);
         </section>
       </aside>
     </section>
+
+    <!-- 人工玩家沿最佳路径通关：金色 Congratulations + 彩带 -->
+    <div v-if="human.win" class="congrats-overlay" @click.self="closeCongrats">
+      <div class="confetti-layer" aria-hidden="true">
+        <i v-for="piece in confetti" :key="piece.id" class="confetti" :style="confettiStyle(piece)"></i>
+      </div>
+      <div class="congrats-card">
+        <h2 class="congrats-title">Congratulations</h2>
+        <p class="congrats-sub">你沿最佳路径抵达终点！</p>
+        <p class="congrats-steps">用时 {{ human.trail.length - 1 }} 步（最佳路径）</p>
+        <div class="congrats-actions">
+          <button class="primary" @click="closeCongrats(); resetHumanPlayer();">再玩一次</button>
+          <button @click="closeCongrats(); exitHumanPlayer();">退出</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- BOSS 结果可视化弹窗 -->
+    <div v-if="bossModal.open" class="boss-modal-overlay" @click.self="closeBossModal">
+      <div class="boss-modal">
+        <div class="boss-modal-head">
+          <div class="boss-tabs">
+            <button :class="{ active: bossModal.kind === 'solve' }" :disabled="!state.bossResult" @click="bossModal.kind = 'solve'">BOSS 攻略</button>
+            <button :class="{ active: bossModal.kind === 'battle' }" :disabled="!state.battleResult" @click="bossModal.kind = 'battle'">实战推演</button>
+          </div>
+          <button class="close-x" title="关闭 (Esc)" @click="closeBossModal">✕</button>
+        </div>
+
+        <div class="boss-modal-body">
+          <!-- 分支限界攻略：每个 BOSS 的血条 + 技能序列 -->
+          <template v-if="bossModal.kind === 'solve' && state.bossResult">
+            <div class="boss-summary">
+              <span class="stat"><b>{{ state.bossResult.bossCount }}</b>个 BOSS</span>
+              <span class="stat"><b>{{ state.bossResult.minTurns }}</b>最少总回合</span>
+              <span class="stat"><b>{{ state.bossResult.turnLimit }}</b>回合/场上限</span>
+              <span class="stat"><b>{{ state.bossResult.reviveCost }}</b>复活金币</span>
+            </div>
+            <p v-if="state.bossResult.warning" class="boss-warn">⚠ {{ state.bossResult.warning }}</p>
+            <div class="boss-cards">
+              <div v-for="b in state.bossResult.bosses" :key="b.bossIndex" class="boss-card">
+                <div class="boss-card-head">
+                  <span class="boss-name">BOSS {{ b.bossIndex + 1 }}</span>
+                  <span class="boss-hp">HP {{ b.hp }}</span>
+                  <span class="boss-turns" :class="{ over: b.minTurns == null || b.minTurns > state.bossResult.turnLimit }">
+                    {{ b.minTurns == null ? '无解' : b.minTurns + ' 回合' }}
+                  </span>
+                </div>
+                <div class="hp-bar">
+                  <i
+                    v-for="(sid, i) in b.bestSequence"
+                    :key="i"
+                    class="hp-seg"
+                    :style="hpSegStyle(b, sid, i)"
+                    :title="skillLabel(b, sid)"
+                  ></i>
+                </div>
+                <div class="skill-seq">
+                  <span v-for="(sid, i) in b.bestSequence" :key="i" class="skill-chip">
+                    <b>{{ i + 1 }}</b>{{ skillLabel(b, sid) }}
+                  </span>
+                  <span v-if="!b.bestSequence.length" class="skill-empty">该 BOSS 无可行技能序列</span>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- 实战推演：结果徽标 + 金币条 + 事件时间线 -->
+          <template v-else-if="bossModal.kind === 'battle' && state.battleResult">
+            <div class="battle-summary">
+              <span class="result-badge" :class="state.battleResult.cleared ? 'win' : 'lose'">
+                {{ state.battleResult.cleared ? '通关 ✓' : 'GAME OVER' }}
+              </span>
+              <span class="stat"><b>{{ state.battleResult.bossesDefeated }}/{{ state.battleResult.bossCount }}</b>击败</span>
+              <span class="stat"><b>{{ state.battleResult.totalRounds }}</b>总回合</span>
+              <span class="stat"><b>{{ state.battleResult.revives }}</b>次复活</span>
+            </div>
+            <div class="coin-track">
+              <span class="coin-label">金币 {{ state.battleResult.startCoins }} → {{ state.battleResult.remainingCoins }}</span>
+              <div class="coin-bar"><i :style="{ width: coinPercent(state.battleResult) + '%' }"></i></div>
+            </div>
+            <p v-if="state.battleResult.warning" class="boss-warn">⚠ {{ state.battleResult.warning }}</p>
+            <ol class="battle-log">
+              <li v-for="(ev, i) in state.battleResult.log" :key="i" :class="'ev-' + ev.event">
+                <span class="ev-icon">{{ battleEventIcon(ev) }}</span>
+                <span class="ev-text">{{ battleEventText(ev) }}</span>
+                <span v-if="ev.coinsLeft != null" class="ev-coins">💰 {{ ev.coinsLeft }}</span>
+              </li>
+            </ol>
+          </template>
+        </div>
+      </div>
+    </div>
   </main>
 </template>
